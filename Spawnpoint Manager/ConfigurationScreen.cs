@@ -52,7 +52,7 @@ public static class ConfigurationScreen
 
             new HorizontalOption(
                 "Checkpoint Mode",
-                "Manual: game's own checkpoints (benches, hazard triggers, room entry) are ignored",
+                "Manual: game's own checkpoints are ignored",
                 new[] { "Auto", "Manual" },
                 i =>
                 {
@@ -77,6 +77,10 @@ public static class ConfigurationScreen
             new KeyBind("Next Point", settings.Keybinds.Next),
             new KeyBind("Delete Point (hold)\n\n\nCreate Point (tap)", settings.Keybinds.Spawn),
             new KeyBind("Clear all (hold)", settings.Keybinds.Clear),
+
+            new TextPanel("Presets"),
+            new KeyBind("Save Preset", settings.Keybinds.SavePreset),
+            new KeyBind("Open Preset Menu", settings.Keybinds.OpenPresetMenu),
         };
 
         _menuRef ??= new Menu(
