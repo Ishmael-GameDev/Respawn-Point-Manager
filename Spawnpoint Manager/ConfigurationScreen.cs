@@ -1,4 +1,4 @@
-﻿using System.Collections.Generic;
+using System.Collections.Generic;
 using Satchel.BetterMenus;
 using UnityEngine;
 
@@ -36,6 +36,40 @@ public static class ConfigurationScreen
                     RespawnPointManager.Instance.RedrawCounters();
                 },
                 () => settings.PositionIndex
+            ),
+
+            new HorizontalOption(
+                "Teleport Mode",
+                "Multi Scene keeps points when you change rooms and can teleport across scenes",
+                new[] { "Single Scene", "Multi Scene" },
+                i =>
+                {
+                    settings.MultiSceneMode = i == 1;
+                    RespawnPointManager.Instance.OnTeleportModeChanged();
+                },
+                () => settings.MultiSceneMode ? 1 : 0
+            ),
+
+            new HorizontalOption(
+                "Checkpoint Mode",
+                "Manual: game's own checkpoints (benches, hazard triggers, room entry) are ignored",
+                new[] { "Auto", "Manual" },
+                i =>
+                {
+                    settings.ManualCheckpointMode = i == 1;
+                },
+                () => settings.ManualCheckpointMode ? 1 : 0
+            ),
+
+            new HorizontalOption(
+                "Ignore Entry Checkpoint",
+                "Entry Checkpoint doesn't count as a point. Always works in Manual mode",
+                new[] { "On", "Off" },
+                i =>
+                {
+                    settings.IgnoreEntryCheckpoint = i == 0;
+                },
+                () => settings.IgnoreEntryCheckpoint ? 0 : 1
             ),
 
             new TextPanel("Keybinds"),
