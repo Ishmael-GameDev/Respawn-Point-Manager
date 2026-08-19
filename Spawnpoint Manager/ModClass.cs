@@ -1,4 +1,4 @@
-﻿using Modding;
+using Modding;
 using UnityEngine;
 using System;
 using System.Reflection;
@@ -40,29 +40,54 @@ namespace RespawnPointManager
         public bool ShowCounter = true;
         public int PositionIndex = 2;
 
+        public bool MultiSceneMode = false;
+
+        public bool ManualCheckpointMode = false;
+
+        public bool IgnoreEntryCheckpoint = true;
+
         [JsonProperty]
         [JsonConverter(typeof(PlayerActionSetConverter))]
         public RPMActionSet Keybinds = new RPMActionSet();
     }
 
+    public struct SpawnPoint
+    {
+        public Vector3 Position;
+        public string SceneName;
+
+        public SpawnPoint(Vector3 position, string sceneName)
+        {
+            Position = position;
+            SceneName = sceneName;
+        }
+    }
+
     public class RespawnPointManager : Mod, IGlobalSettings<GlobalSettings>, ICustomMenuMod
     {
         public static RespawnPointManager Instance;
-        public override string GetVersion() => "2.4.0";
+        public override string GetVersion() => "2.5.0";
 
         public static GlobalSettings Settings { get; set; } = new GlobalSettings();
         public void OnLoadGlobal(GlobalSettings s) => Settings = s;
         public GlobalSettings OnSaveGlobal() => Settings;
 
+        private const float TeleportLiftHeight = 0.3f;
+        private const float DuplicatePointRadius = 2f;
+
         private Sprite _checkpointSprite;
         public static GameObject _hudHazard;
         private Vector3 origpos;
 
-        private List<Vector3> savedSpawns = new List<Vector3>();
+        private List<SpawnPoint> savedSpawns = new List<SpawnPoint>();
         private int currentIndex = -1;
         private Vector3 lastHazardLocation = Vector3.zero;
         private bool isTeleporting = false;
         private float _holdTimer;
+
+        private bool _pendingEntryCheckpoint = false;
+
+        private bool _forceAcceptNextHazard = false;
 
         private float _blockEntryTimer = 0f;
         public override void Initialize()
@@ -74,13 +99,23 @@ namespace RespawnPointManager
             On.HeroController.Update += OnHeroUpdate;
 
             UnityEngine.SceneManagement.SceneManager.activeSceneChanged += (oldScene, newScene) => {
-                savedSpawns.Clear();
-                currentIndex = -1;
+                if (!Settings.MultiSceneMode)
+                {
+                    savedSpawns.Clear();
+                    currentIndex = -1;
+                }
+                else
+                {
+                    if (currentIndex >= savedSpawns.Count)
+                        currentIndex = savedSpawns.Count - 1;
+                }
+
                 lastHazardLocation = Vector3.zero;
-                _blockEntryTimer = 1.5f;
+                _blockEntryTimer = 0.5f;
+                _pendingEntryCheckpoint = true;
 
                 UpdateHUD();
-                Log($"[HazardSpawnMod] Scene {newScene.name}: Data WIPED. Entry lock active.");
+                Log($"[HazardSpawnMod] Scene {newScene.name}: {(Settings.MultiSceneMode ? "Multi-scene mode, data kept" : "Data WIPED")}. Entry lock active.");
             };
 
             On.DisplayItemAmount.OnEnable += (orig, self) => {
@@ -93,6 +128,18 @@ namespace RespawnPointManager
             return ConfigurationScreen.GetScreen(modListMenu, Settings);
         }
         public bool ToggleButtonInsideMenu => true;
+
+        public void OnTeleportModeChanged()
+        {
+            if (!Settings.MultiSceneMode)
+            {
+                string scene = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name;
+                savedSpawns = savedSpawns.Where(p => p.SceneName == scene).ToList();
+                if (currentIndex >= savedSpawns.Count) currentIndex = savedSpawns.Count - 1;
+                UpdateHUD();
+            }
+        }
+
         private void OnHeroUpdate(On.HeroController.orig_Update orig, HeroController self)
         {
             orig(self);
@@ -108,13 +155,38 @@ namespace RespawnPointManager
 
             if (currentHazard != Vector3.zero && currentHazard != lastHazardLocation)
             {
-                lastHazardLocation = currentHazard;
+                string scene = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name;
 
-                if (!savedSpawns.Any(p => Vector3.Distance(p, currentHazard) < 0.1f))
+                bool suppressEntryCheckpoint = Settings.ManualCheckpointMode || Settings.IgnoreEntryCheckpoint;
+                bool isEntryCheckpoint = _pendingEntryCheckpoint;
+                _pendingEntryCheckpoint = false;
+
+                if (_forceAcceptNextHazard)
                 {
-                    savedSpawns.Add(currentHazard);
-                    currentIndex = savedSpawns.Count - 1;
-                    UpdateHUD();
+                    _forceAcceptNextHazard = false;
+                    lastHazardLocation = currentHazard;
+
+                    if (!savedSpawns.Any(p => p.SceneName == scene && Vector3.Distance(p.Position, currentHazard) < DuplicatePointRadius))
+                    {
+                        AddSpawnPoint(new SpawnPoint(currentHazard, scene));
+                    }
+                }
+                else if (isEntryCheckpoint && suppressEntryCheckpoint)
+                {
+                    lastHazardLocation = currentHazard;
+                }
+                else if (Settings.ManualCheckpointMode)
+                {
+                    HeroController.instance.SetHazardRespawn(lastHazardLocation, false);
+                }
+                else
+                {
+                    lastHazardLocation = currentHazard;
+
+                    if (!savedSpawns.Any(p => p.SceneName == scene && Vector3.Distance(p.Position, currentHazard) < DuplicatePointRadius))
+                    {
+                        AddSpawnPoint(new SpawnPoint(currentHazard, scene));
+                    }
                 }
             }
 
@@ -179,15 +251,45 @@ namespace RespawnPointManager
                 }
             }
         }
+        private void AddSpawnPoint(SpawnPoint point)
+        {
+            bool wasAtEnd = currentIndex == savedSpawns.Count - 1;
+
+            savedSpawns.Add(point);
+
+            if (wasAtEnd)
+            {
+                currentIndex = savedSpawns.Count - 1;
+            }
+
+            UpdateHUD();
+        }
+
+        private void ForceSaveHazardAtTeleport(SpawnPoint target)
+        {
+            HeroController.instance.SetHazardRespawn(target.Position, false);
+            lastHazardLocation = target.Position;
+            _pendingEntryCheckpoint = false;
+            _forceAcceptNextHazard = false;
+        }
+
         private void TryTeleportOrNavigateBack()
         {
             if (savedSpawns.Count == 0 || currentIndex < 0)
                 return;
 
-            Vector3 playerPos = HeroController.instance.transform.position;
-            Vector3 currentSpawn = savedSpawns[currentIndex];
+            SpawnPoint currentSpawn = savedSpawns[currentIndex];
+            string currentScene = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name;
 
-            if (Vector3.Distance(playerPos, currentSpawn) > 1f)
+            if (currentSpawn.SceneName != currentScene)
+            {
+                GameManager.instance.StartCoroutine(TeleportRoutine(currentSpawn));
+                return;
+            }
+
+            Vector3 playerPos = HeroController.instance.transform.position;
+
+            if (Vector3.Distance(playerPos, currentSpawn.Position) > DuplicatePointRadius)
             {
                 GameManager.instance.StartCoroutine(TeleportRoutine(currentSpawn));
             }
@@ -198,15 +300,25 @@ namespace RespawnPointManager
         }
         private void DeleteLast()
         {
-            if (savedSpawns.Count <= 0)
+            string scene = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name;
+            int lastIndex = savedSpawns.FindLastIndex(p => p.SceneName == scene);
+
+            if (lastIndex < 0)
                 return;
 
-            int lastIndex = savedSpawns.Count - 1;
-
-            // Если есть предыдущая точка, делаем ее активной
-            if (savedSpawns.Count >= 2)
+            int prevIndexInScene = -1;
+            for (int i = lastIndex - 1; i >= 0; i--)
             {
-                Vector3 previous = savedSpawns[lastIndex - 1];
+                if (savedSpawns[i].SceneName == scene)
+                {
+                    prevIndexInScene = i;
+                    break;
+                }
+            }
+
+            if (prevIndexInScene >= 0)
+            {
+                Vector3 previous = savedSpawns[prevIndexInScene].Position;
 
                 HeroController.instance.SetHazardRespawn(previous, false);
 
@@ -215,7 +327,16 @@ namespace RespawnPointManager
             else
             {
                 lastHazardLocation = Vector3.zero;
+
+                bool suppressEntryCheckpoint = Settings.ManualCheckpointMode || Settings.IgnoreEntryCheckpoint;
+                if (suppressEntryCheckpoint && HeroController.instance != null)
+                {
+                    HeroController.instance.SetHazardRespawn(Vector3.zero, false);
+                }
             }
+
+            _pendingEntryCheckpoint = false;
+            _forceAcceptNextHazard = false;
 
             savedSpawns.RemoveAt(lastIndex);
 
@@ -231,6 +352,15 @@ namespace RespawnPointManager
             savedSpawns.Clear();
             currentIndex = -1;
             lastHazardLocation = Vector3.zero;
+            _pendingEntryCheckpoint = false;
+            _forceAcceptNextHazard = false;
+
+            bool suppressEntryCheckpoint = Settings.ManualCheckpointMode || Settings.IgnoreEntryCheckpoint;
+            if (suppressEntryCheckpoint && HeroController.instance != null)
+            {
+                HeroController.instance.SetHazardRespawn(Vector3.zero, false);
+            }
+
             if (_hudHazard != null) UpdateHUD();
             Log("All points cleared.");
         }
@@ -240,6 +370,7 @@ namespace RespawnPointManager
 
             HeroController.instance.SetHazardRespawn(pos, false);
 
+            _forceAcceptNextHazard = true;
             lastHazardLocation = Vector3.zero;
 
             Log("Spawn created at " + pos);
@@ -295,15 +426,82 @@ namespace RespawnPointManager
             }
         }
 
-        private IEnumerator TeleportRoutine(Vector3 targetPos)
+        private IEnumerator TeleportRoutine(SpawnPoint target)
         {
             isTeleporting = true;
+
+            string currentScene = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name;
+
+            if (target.SceneName != currentScene)
+            {
+                if (!SceneCanBeLoaded(target.SceneName))
+                {
+                    Log($"[HazardSpawnMod] Teleport aborted: scene '{target.SceneName}' cannot be loaded.");
+                    isTeleporting = false;
+                    yield break;
+                }
+
+                yield return CrossSceneTeleportRoutine(target);
+            }
+            else
+            {
+                Rigidbody2D rb = HeroController.instance.GetComponent<Rigidbody2D>();
+                if (rb != null) rb.velocity = Vector2.zero;
+                HeroController.instance.transform.position = new Vector3(target.Position.x, target.Position.y + TeleportLiftHeight, target.Position.z);
+                yield return new WaitForSeconds(0.1f);
+                if (rb != null) rb.velocity = Vector2.zero;
+
+                ForceSaveHazardAtTeleport(target);
+            }
+
+            isTeleporting = false;
+        }
+
+        private bool SceneCanBeLoaded(string sceneName)
+        {
+            if (string.IsNullOrEmpty(sceneName)) return false;
+            try
+            {
+                return Application.CanStreamedLevelBeLoaded(sceneName);
+            }
+            catch (Exception e)
+            {
+                Log($"[HazardSpawnMod] Scene check failed for '{sceneName}': {e.Message}");
+                return false;
+            }
+        }
+
+        private IEnumerator CrossSceneTeleportRoutine(SpawnPoint target)
+        {
+            _blockEntryTimer = 0.5f;
+
+            HeroController.instance.StopAnimationControl();
             Rigidbody2D rb = HeroController.instance.GetComponent<Rigidbody2D>();
             if (rb != null) rb.velocity = Vector2.zero;
-            HeroController.instance.transform.position = new Vector3(targetPos.x, targetPos.y + 0.5f, targetPos.z);
-            yield return new WaitForSeconds(0.1f);
+            HeroController.instance.RegainControl();
+
+            GameManager.instance.BeginSceneTransition(new GameManager.SceneLoadInfo
+            {
+                SceneName = target.SceneName,
+                EntryGateName = "dreamGate",
+                EntryDelay = 0f,
+                WaitForSceneTransitionCameraFade = false,
+                Visualization = GameManager.SceneLoadVisualizations.Default,
+                AlwaysUnloadUnusedAssets = true
+            });
+
+            yield return new WaitWhile(() => GameManager.instance.IsInSceneTransition);
+            yield return null; // даём сцене осесть кадр перед тем как трогать позицию
+
             if (rb != null) rb.velocity = Vector2.zero;
-            isTeleporting = false;
+            HeroController.instance.transform.position = new Vector3(target.Position.x, target.Position.y + TeleportLiftHeight, target.Position.z);
+            if (rb != null) rb.velocity = Vector2.zero;
+
+            HeroController.instance.RegainControl();
+            if (GameManager.instance.cameraCtrl != null) GameManager.instance.cameraCtrl.FadeSceneIn();
+
+            ForceSaveHazardAtTeleport(target);
+            UpdateHUD();
         }
 
         private GameObject CreateStatObject(string name, string text, GameObject prefab, Transform parent, Sprite sprite, Vector3 offset)
@@ -344,25 +542,5 @@ namespace RespawnPointManager
                 return Sprite.Create(tex, new Rect(0, 0, tex.width, tex.height), new Vector2(0.5f, 0.5f), 150f);
             }
         }
-
-        /*public bool ToggleButtonInsideMenu => true;
-        public List<IMenuMod.MenuEntry> GetMenuData(IMenuMod.MenuEntry? toggleButtonEntry)
-        {
-            return new List<IMenuMod.MenuEntry>
-            {
-                new IMenuMod.MenuEntry {
-                    Name = "Show Counter",
-                    Values = new[] { "On", "Off" },
-                    Saver = opt => { Settings.ShowCounter = opt == 0; RedrawCounters(); },
-                    Loader = () => Settings.ShowCounter ? 0 : 1
-                },
-                new IMenuMod.MenuEntry {
-                    Name = "HUD Position",
-                    Values = new[] { "Screen Edge", "Beside Geo", "Far From Geo" },
-                    Saver = opt => { Settings.PositionIndex = opt; RedrawCounters(); },
-                    Loader = () => Settings.PositionIndex
-                }
-            };
-        }*/
     }
 }
