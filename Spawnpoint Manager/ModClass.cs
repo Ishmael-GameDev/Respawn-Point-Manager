@@ -21,6 +21,8 @@ namespace RespawnPointManager
         public PlayerAction Teleport;
         public PlayerAction Next;
         public PlayerAction Clear;
+        public PlayerAction SavePreset;
+        public PlayerAction OpenPresetMenu;
 
         public RPMActionSet()
         {
@@ -28,11 +30,15 @@ namespace RespawnPointManager
             Teleport = CreatePlayerAction("Previous Point");
             Next = CreatePlayerAction("Next Point");
             Clear = CreatePlayerAction("Clear All");
+            SavePreset = CreatePlayerAction("Save Preset");
+            OpenPresetMenu = CreatePlayerAction("Open Preset Menu");
 
             Spawn.AddDefaultBinding(Key.Key3);
             Teleport.AddDefaultBinding(Key.Key1);
             Next.AddDefaultBinding(Key.Key2);
             Clear.AddDefaultBinding(Key.Key4);
+            SavePreset.AddDefaultBinding(Key.Key5);
+            OpenPresetMenu.AddDefaultBinding(Key.Key6);
         }
     }
     public class GlobalSettings
@@ -72,7 +78,7 @@ namespace RespawnPointManager
         public void OnLoadGlobal(GlobalSettings s) => Settings = s;
         public GlobalSettings OnSaveGlobal() => Settings;
 
-        private const float TeleportLiftHeight = 0.3f;
+        private const float TeleportLiftHeight = 0.2f;
         private const float DuplicatePointRadius = 2f;
 
         private Sprite _checkpointSprite;
@@ -138,6 +144,57 @@ namespace RespawnPointManager
                 if (currentIndex >= savedSpawns.Count) currentIndex = savedSpawns.Count - 1;
                 UpdateHUD();
             }
+        }
+
+        public void LoadPreset(List<SpawnPoint> points)
+        {
+            savedSpawns = points ?? new List<SpawnPoint>();
+
+            string currentScene = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name;
+            bool playerInPresetScene = savedSpawns.Any(p => p.SceneName == currentScene);
+
+            if (savedSpawns.Count == 0)
+            {
+                currentIndex = -1;
+            }
+            else if (!playerInPresetScene)
+            {
+                currentIndex = 0;
+            }
+            else
+            {
+                Vector3 playerPos = HeroController.instance != null
+                    ? HeroController.instance.transform.position
+                    : Vector3.zero;
+
+                int nearestIndex = -1;
+                float bestDist = float.MaxValue;
+
+                for (int i = 0; i < savedSpawns.Count; i++)
+                {
+                    if (savedSpawns[i].SceneName != currentScene) continue;
+
+                    float d = Vector3.Distance(savedSpawns[i].Position, playerPos);
+                    if (d < bestDist)
+                    {
+                        bestDist = d;
+                        nearestIndex = i;
+                    }
+                }
+
+                currentIndex = nearestIndex >= 0 ? nearestIndex : 0;
+            }
+
+            bool spansMultipleScenes = savedSpawns.Select(p => p.SceneName).Distinct().Count() > 1;
+            if (spansMultipleScenes) Settings.MultiSceneMode = true;
+
+            lastHazardLocation = PlayerData.instance != null ? PlayerData.instance.hazardRespawnLocation : Vector3.zero;
+            _pendingEntryCheckpoint = false;
+            _forceAcceptNextHazard = false;
+
+            UpdateHUD();
+
+            Log($"[HazardSpawnMod] Preset loaded: {savedSpawns.Count} points, current index {currentIndex}.");
         }
 
         private void OnHeroUpdate(On.HeroController.orig_Update orig, HeroController self)
@@ -248,6 +305,16 @@ namespace RespawnPointManager
                 if (Settings.Keybinds.Clear.WasReleased)
                 {
                     _holdTimer = 0f;
+                }
+
+                if (Settings.Keybinds.SavePreset.WasPressed)
+                {
+                    PresetManager.SaveCurrentPreset(savedSpawns);
+                }
+
+                if (Settings.Keybinds.OpenPresetMenu.WasPressed)
+                {
+                    PresetMenuUI.Toggle();
                 }
             }
         }
@@ -491,7 +558,7 @@ namespace RespawnPointManager
             });
 
             yield return new WaitWhile(() => GameManager.instance.IsInSceneTransition);
-            yield return null; // даём сцене осесть кадр перед тем как трогать позицию
+            yield return null;
 
             if (rb != null) rb.velocity = Vector2.zero;
             HeroController.instance.transform.position = new Vector3(target.Position.x, target.Position.y + TeleportLiftHeight, target.Position.z);
