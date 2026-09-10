@@ -40,7 +40,7 @@ public static class ConfigurationScreen
 
             new HorizontalOption(
                 "Teleport Mode",
-                "Multi Scene keeps points when you change rooms and can teleport across scenes",
+                "Multi Scene keeps points when you change rooms",
                 new[] { "Single Scene", "Multi Scene" },
                 i =>
                 {
@@ -70,6 +70,34 @@ public static class ConfigurationScreen
                     settings.IgnoreEntryCheckpoint = i == 0;
                 },
                 () => settings.IgnoreEntryCheckpoint ? 0 : 1
+            ),
+
+            new HorizontalOption(
+                "Checkpoint Texture",
+                "Which picture is drawn as the checkpoint icon",
+                RespawnPointManager.CheckpointTextureNames,
+                i =>
+                {
+                    settings.CheckpointTextureIndex = i;
+                    RespawnPointManager.Instance.ApplyCheckpointTexture();
+                },
+                () => settings.CheckpointTextureIndex
+            ),
+
+            new TextPanel(
+                $"Custom option looks for '{RespawnPointManager.CustomCheckpointFileName}' inside this mod's own folder"
+            ),
+
+            new HorizontalOption(
+                "In-Scene Checkpoints",
+                "Which saved spawn points get a 2m-tall checkpoint icon drawn out",
+                RespawnPointManager.SpawnpointRenderModeNames,
+                i =>
+                {
+                    settings.SpawnpointRenderMode = i;
+                    RespawnPointManager.Instance.RefreshSceneMarkers();
+                },
+                () => settings.SpawnpointRenderMode
             ),
 
             new TextPanel("Keybinds"),
