@@ -51,6 +51,9 @@ namespace RespawnPointManager
         public bool ManualCheckpointMode = false;
 
         public bool IgnoreEntryCheckpoint = true;
+        public int CheckpointTextureIndex = 0;
+
+        public int SpawnpointRenderMode = 0;
 
         [JsonProperty]
         [JsonConverter(typeof(PlayerActionSetConverter))]
@@ -72,7 +75,7 @@ namespace RespawnPointManager
     public class RespawnPointManager : Mod, IGlobalSettings<GlobalSettings>, ICustomMenuMod
     {
         public static RespawnPointManager Instance;
-        public override string GetVersion() => "2.5.0";
+        public override string GetVersion() => "2.6.0";
 
         public static GlobalSettings Settings { get; set; } = new GlobalSettings();
         public void OnLoadGlobal(GlobalSettings s) => Settings = s;
@@ -81,9 +84,56 @@ namespace RespawnPointManager
         private const float TeleportLiftHeight = 0.2f;
         private const float DuplicatePointRadius = 2f;
 
+        private const float CheckpointIconWorldHeight = 0.84f;
+
+        private const float SpawnpointWorldHeight = 2f;
+
+        private static float SpawnpointMarkerYOffset = -0.3f;
+        private static float TextGapFromIconEdge = 0.6f;
+
+        private static float SceneMarkerZOffsetBehindHero = 0.5f;
+        private static string SceneMarkerSortingLayerName = "Default";
+        private static int SceneMarkerSortingOrder = 0;
+
+        private Renderer GetHeroRenderer()
+        {
+            if (HeroController.instance == null) return null;
+            var direct = HeroController.instance.GetComponent<Renderer>();
+            if (direct != null) return direct;
+            return HeroController.instance.GetComponentInChildren<Renderer>();
+        }
+
+        public const string CustomCheckpointFileName = "image.png";
+
+        private static readonly string[] BuiltinCheckpointResources =
+        {
+            "checkpoint.png",
+            "checkpoint_celeste.png",
+            "checkpoint_deltarune.png",
+            "checkpoint_iwbtg.png",
+        };
+
+        public static readonly string[] CheckpointTextureNames =
+        {
+            "Geometry Dash", "Celeste", "Deltarune", "IWBTG", "Custom"
+        };
+
+        public static readonly string[] SpawnpointRenderModeNames =
+        {
+            "All", "Current Only", "None"
+        };
+
         private Sprite _checkpointSprite;
+        private Sprite _worldCheckpointSprite;
+
         public static GameObject _hudHazard;
         private Vector3 origpos;
+
+        private Vector3 _geoAmountBaseLocalPos = Vector3.zero;
+
+        private bool _loggedHeroRendererOnce = false;
+
+        private readonly List<GameObject> _sceneMarkers = new List<GameObject>();
 
         private List<SpawnPoint> savedSpawns = new List<SpawnPoint>();
         private int currentIndex = -1;
@@ -99,7 +149,7 @@ namespace RespawnPointManager
         public override void Initialize()
         {
             Instance = this;
-            _checkpointSprite = LoadSprite();
+            RebuildCheckpointSprites(Settings.CheckpointTextureIndex);
 
             On.HeroController.Awake += Awake;
             On.HeroController.Update += OnHeroUpdate;
@@ -121,6 +171,7 @@ namespace RespawnPointManager
                 _pendingEntryCheckpoint = true;
 
                 UpdateHUD();
+                RefreshSceneMarkers();
                 Log($"[HazardSpawnMod] Scene {newScene.name}: {(Settings.MultiSceneMode ? "Multi-scene mode, data kept" : "Data WIPED")}. Entry lock active.");
             };
 
@@ -143,6 +194,7 @@ namespace RespawnPointManager
                 savedSpawns = savedSpawns.Where(p => p.SceneName == scene).ToList();
                 if (currentIndex >= savedSpawns.Count) currentIndex = savedSpawns.Count - 1;
                 UpdateHUD();
+                RefreshSceneMarkers();
             }
         }
 
@@ -193,6 +245,7 @@ namespace RespawnPointManager
             _forceAcceptNextHazard = false;
 
             UpdateHUD();
+            RefreshSceneMarkers();
 
             Log($"[HazardSpawnMod] Preset loaded: {savedSpawns.Count} points, current index {currentIndex}.");
         }
@@ -247,7 +300,6 @@ namespace RespawnPointManager
                 }
             }
 
-            // Управление
             if (!isTeleporting)
             {
                 if (Settings.Keybinds.Teleport.WasPressed)
@@ -330,6 +382,7 @@ namespace RespawnPointManager
             }
 
             UpdateHUD();
+            RefreshSceneMarkers();
         }
 
         private void ForceSaveHazardAtTeleport(SpawnPoint target)
@@ -413,6 +466,7 @@ namespace RespawnPointManager
             }
 
             UpdateHUD();
+            RefreshSceneMarkers();
         }
         private void ClearAllData()
         {
@@ -429,6 +483,7 @@ namespace RespawnPointManager
             }
 
             if (_hudHazard != null) UpdateHUD();
+            RefreshSceneMarkers();
             Log("All points cleared.");
         }
         private void CreateSpawnAtPlayer()
@@ -449,6 +504,7 @@ namespace RespawnPointManager
             var prefab = GameManager.instance.inventoryFSM.gameObject.FindGameObjectInChildren("Geo");
             origpos = prefab.transform.position;
             DrawHud(prefab, hudCanvas);
+            RefreshSceneMarkers();
         }
 
         public void UpdateHUD()
@@ -457,7 +513,7 @@ namespace RespawnPointManager
             {
                 int displayCount = savedSpawns.Count;
                 int displayIndex = (currentIndex == -1) ? 0 : currentIndex + 1;
-                _hudHazard.GetComponent<DisplayItemAmount>().textObject.text = $"{displayIndex} / {displayCount}";
+                _hudHazard.GetComponent<DisplayItemAmount>().textObject.text = $" {displayIndex} / {displayCount}";
             }
         }
 
@@ -481,6 +537,201 @@ namespace RespawnPointManager
             UpdateHUD();
         }
 
+        public void ApplyCheckpointTexture()
+        {
+            if (!RebuildCheckpointSprites(Settings.CheckpointTextureIndex))
+            {
+                Log("[HazardSpawnMod] Could not load the selected checkpoint texture, keeping the previous one.");
+                return;
+            }
+
+            if (_hudHazard != null)
+            {
+                var renderer = _hudHazard.GetComponent<SpriteRenderer>();
+                if (renderer != null) renderer.sprite = _checkpointSprite;
+                ApplyHudTextOffset(_checkpointSprite);
+            }
+
+            RefreshSceneMarkers();
+        }
+
+        private void ApplyHudTextOffset(Sprite sprite)
+        {
+            if (_hudHazard == null || sprite == null) return;
+            var geoAmount = _hudHazard.FindGameObjectInChildren("Geo Amount");
+            if (geoAmount == null) return;
+
+            float halfWidth = sprite.bounds.size.x * 0.5f;
+            float textLocalX = halfWidth + TextGapFromIconEdge;
+
+            geoAmount.transform.localPosition = new Vector3(textLocalX, _geoAmountBaseLocalPos.y, _geoAmountBaseLocalPos.z);
+        }
+
+        private bool RebuildCheckpointSprites(int index)
+        {
+            Texture2D tex = LoadCheckpointTexture(index);
+            if (tex == null) return false;
+
+            _checkpointSprite = MakeSprite(tex, CheckpointIconWorldHeight);
+            _worldCheckpointSprite = MakeSprite(tex, SpawnpointWorldHeight);
+            return true;
+        }
+
+        private Texture2D LoadCheckpointTexture(int index)
+        {
+            Texture2D tex = index == BuiltinCheckpointResources.Length
+                ? LoadCustomTexture()
+                : LoadEmbeddedTexture(BuiltinCheckpointResources[Mathf.Clamp(index, 0, BuiltinCheckpointResources.Length - 1)]);
+
+            if (tex == null && BuiltinCheckpointResources.Length > 0)
+            {
+                tex = LoadEmbeddedTexture(BuiltinCheckpointResources[0]);
+            }
+
+            return tex;
+        }
+
+        private Sprite MakeSprite(Texture2D tex, float worldHeight)
+        {
+            float pixelsPerUnit = tex.height / worldHeight;
+            return Sprite.Create(tex, new Rect(0, 0, tex.width, tex.height), new Vector2(0.5f, 0.5f), pixelsPerUnit);
+        }
+
+        private Texture2D LoadEmbeddedTexture(string fileName)
+        {
+            var asm = Assembly.GetExecutingAssembly();
+            var resourceName = asm.GetManifestResourceNames().FirstOrDefault(x => x.EndsWith(fileName));
+            if (string.IsNullOrEmpty(resourceName)) return null;
+
+            using (Stream res = asm.GetManifestResourceStream(resourceName))
+            {
+                if (res == null) return null;
+
+                byte[] buffer = new byte[res.Length];
+                res.Read(buffer, 0, buffer.Length);
+
+                var tex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+                return tex.LoadImage(buffer, true) ? tex : null;
+            }
+        }
+
+        private Texture2D LoadCustomTexture()
+        {
+            try
+            {
+                string dllDirectory = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
+                if (string.IsNullOrEmpty(dllDirectory)) return null;
+
+                string path = Path.Combine(dllDirectory, CustomCheckpointFileName);
+
+                if (!File.Exists(path))
+                {
+                    Log($"[HazardSpawnMod] Custom checkpoint image not found: '{path}'.");
+                    return null;
+                }
+
+                byte[] buffer = File.ReadAllBytes(path);
+                var tex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+
+                if (!tex.LoadImage(buffer, true))
+                {
+                    Log($"[HazardSpawnMod] '{path}' could not be decoded as an image.");
+                    return null;
+                }
+
+                return tex;
+            }
+            catch (Exception e)
+            {
+                Log($"[HazardSpawnMod] Failed to load custom checkpoint image: {e.Message}");
+                return null;
+            }
+        }
+
+        public void RefreshSceneMarkers()
+        {
+            foreach (var marker in _sceneMarkers)
+            {
+                if (marker != null) UnityEngine.Object.Destroy(marker);
+            }
+            _sceneMarkers.Clear();
+
+            if (Settings.SpawnpointRenderMode == 2) return;
+            if (_worldCheckpointSprite == null) return;
+
+            string currentScene = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name;
+
+            if (Settings.SpawnpointRenderMode == 1)
+            {
+                if (currentIndex >= 0 && currentIndex < savedSpawns.Count)
+                {
+                    SpawnPoint current = savedSpawns[currentIndex];
+                    if (current.SceneName == currentScene)
+                    {
+                        _sceneMarkers.Add(CreateSceneMarker(current.Position));
+                    }
+                }
+                return;
+            }
+
+            for (int i = 0; i < savedSpawns.Count; i++)
+            {
+                if (savedSpawns[i].SceneName == currentScene)
+                {
+                    _sceneMarkers.Add(CreateSceneMarker(savedSpawns[i].Position));
+                }
+            }
+        }
+
+        private GameObject CreateSceneMarker(Vector3 position)
+        {
+            var go = new GameObject("RPM_CheckpointMarker");
+            go.transform.position = position + new Vector3(0f, SpawnpointMarkerYOffset, 0f);
+
+            var renderer = go.AddComponent<SpriteRenderer>();
+            renderer.sprite = _worldCheckpointSprite;
+
+            var heroRenderer = GetHeroRenderer();
+            if (heroRenderer != null)
+            {
+                renderer.sortingLayerID = heroRenderer.sortingLayerID;
+                renderer.sortingOrder = heroRenderer.sortingOrder;
+
+                var pos = go.transform.position;
+                pos.z = heroRenderer.transform.position.z + SceneMarkerZOffsetBehindHero;
+                go.transform.position = pos;
+
+                if (!_loggedHeroRendererOnce)
+                {
+                    _loggedHeroRendererOnce = true;
+                    Log($"[HazardSpawnMod] Hero renderer found: {heroRenderer.GetType().Name} on '{heroRenderer.gameObject.name}', " +
+                        $"sortingLayer='{SortingLayer.IDToName(heroRenderer.sortingLayerID)}', sortingOrder={heroRenderer.sortingOrder}, z={heroRenderer.transform.position.z}. " +
+                        $"Markers use the same order, at z={pos.z}.");
+                }
+            }
+            else
+            {
+                renderer.sortingLayerName = SceneMarkerSortingLayerName;
+                renderer.sortingOrder = SceneMarkerSortingOrder;
+
+                if (!_loggedHeroRendererOnce)
+                {
+                    _loggedHeroRendererOnce = true;
+                    Log("[HazardSpawnMod] No renderer found on the Knight - using the static fallback layer/order instead.");
+                }
+            }
+            return go;
+        }
+
+        public static void LogSortingLayers()
+        {
+            var layers = SortingLayer.layers;
+            for (int i = 0; i < layers.Length; i++)
+            {
+                Instance?.Log($"[HazardSpawnMod] SortingLayer[{i}] = '{layers[i].name}' (id {layers[i].id})");
+            }
+        }
+
         private void Navigate(int direction)
         {
             if (savedSpawns.Count == 0) return;
@@ -489,6 +740,7 @@ namespace RespawnPointManager
             {
                 currentIndex = nextIndex;
                 UpdateHUD();
+                RefreshSceneMarkers();
                 GameManager.instance.StartCoroutine(TeleportRoutine(savedSpawns[currentIndex]));
             }
         }
@@ -519,6 +771,7 @@ namespace RespawnPointManager
                 if (rb != null) rb.velocity = Vector2.zero;
 
                 ForceSaveHazardAtTeleport(target);
+                RefreshSceneMarkers();
             }
 
             isTeleporting = false;
@@ -569,6 +822,7 @@ namespace RespawnPointManager
 
             ForceSaveHazardAtTeleport(target);
             UpdateHUD();
+            RefreshSceneMarkers();
         }
 
         private GameObject CreateStatObject(string name, string text, GameObject prefab, Transform parent, Sprite sprite, Vector3 offset)
@@ -579,7 +833,7 @@ namespace RespawnPointManager
             if (sprite != null) renderer.sprite = sprite;
 
             var geoAmount = go.FindGameObjectInChildren("Geo Amount");
-            if (geoAmount != null) geoAmount.transform.localPosition -= new Vector3(0.3f, 0, 0);
+            if (geoAmount != null) _geoAmountBaseLocalPos = geoAmount.transform.localPosition;
 
             var component = go.GetComponent<DisplayItemAmount>();
             component.playerDataInt = name;
@@ -592,22 +846,9 @@ namespace RespawnPointManager
         private void DrawHud(GameObject prefab, GameObject hudCanvas)
         {
             var pos = GetPositionOption();
-            _hudHazard = CreateStatObject("hazard_counter", "0 / 0", prefab, hudCanvas.transform, _checkpointSprite, new Vector3(pos.x, pos.y));
+            _hudHazard = CreateStatObject("hazard_counter", " 0 / 0", prefab, hudCanvas.transform, _checkpointSprite, new Vector3(pos.x, pos.y));
+            ApplyHudTextOffset(_checkpointSprite);
             _hudHazard.SetActive(Settings.ShowCounter);
-        }
-
-        private Sprite LoadSprite()
-        {
-            var resource = Assembly.GetExecutingAssembly().GetManifestResourceNames().FirstOrDefault(x => x.EndsWith("checkpoint.png"));
-            if (string.IsNullOrEmpty(resource)) return null;
-            using (Stream res = Assembly.GetExecutingAssembly().GetManifestResourceStream(resource))
-            {
-                byte[] buffer = new byte[res.Length];
-                res.Read(buffer, 0, buffer.Length);
-                var tex = new Texture2D(1, 1);
-                tex.LoadImage(buffer, true);
-                return Sprite.Create(tex, new Rect(0, 0, tex.width, tex.height), new Vector2(0.5f, 0.5f), 150f);
-            }
         }
     }
 }
