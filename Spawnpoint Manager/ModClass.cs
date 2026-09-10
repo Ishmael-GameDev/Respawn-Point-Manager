@@ -75,7 +75,7 @@ namespace RespawnPointManager
     public class RespawnPointManager : Mod, IGlobalSettings<GlobalSettings>, ICustomMenuMod
     {
         public static RespawnPointManager Instance;
-        public override string GetVersion() => "2.6.0";
+        public override string GetVersion() => "1.3.0";
 
         public static GlobalSettings Settings { get; set; } = new GlobalSettings();
         public void OnLoadGlobal(GlobalSettings s) => Settings = s;
